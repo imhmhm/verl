@@ -130,3 +130,6 @@ logs
 log
 outputs
 .history
+
+fusion_result.json
+kernel_meta/
