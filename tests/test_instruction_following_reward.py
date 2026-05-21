@@ -61,17 +61,9 @@ class TestRemoveThinkingSection:
         assert result == "Hello world"
 
     def test_thinking_tags(self):
-        """Test removing hintText/hre_result_end tags.
-
-        _remove_thinking_section splits on the hintText tag and keeps
-        content after the last occurrence. This handles the common pattern
-        where models output a thinking block followed by the answer.
-        """
-        # Real format: hintText starts with leading space/newline
-        result = _remove_thinking_section(" hintTextLet me analyze.hre_result_end The answer is 42")
-        assert "42" in result
-        # The hre_result_end tag should be removed
-        assert "hre_result_end" not in result
+        """Test removing thinking section tags."""
+        result = _remove_thinking_section("<think>Let me analyze.</think> The answer is 42")
+        assert result == "The answer is 42"
 
     def test_answer_tags(self):
         """Test removing <answer> tags."""

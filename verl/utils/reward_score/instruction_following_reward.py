@@ -25,8 +25,8 @@ import logging
 logger = logging.getLogger("InstructionFollowingReward")
 
 # Tags for thinking section removal
-_THINKING_START_TAG = " hintText"
-_THINKING_END_TAG = "hre_result_end"
+_THINKING_START_TAG = "<think>"
+_THINKING_END_TAG = "</think>"
 _ANSWER_START_TAG = "<answer>"
 _ANSWER_END_TAG = "</answer>"
 
@@ -153,19 +153,15 @@ def _remove_thinking_section(prediction: str) -> str:
     """Remove thinking section and answer tags from prediction.
 
     Handles the common format where models output:
-     hintText...analysis...hre_result_end
+    <think>...reasoning...</think>...answer...
     <answer>...final answer...</answer>
     """
-    # Remove hre_result_end and split
-    prediction = prediction.replace(_THINKING_END_TAG, "").strip()
 
-    # Remove thinking section (everything before last hintText)
-    if _THINKING_START_TAG in prediction:
-        parts = prediction.split(_THINKING_START_TAG)
-        if len(parts) > 1:
-            prediction = parts[-1]
+    # Remove thinking section: take content after last closing tag
+    if _THINKING_END_TAG in prediction:
+        prediction = prediction.split(_THINKING_END_TAG)[-1]
 
-    # Remove answer tags
+    # Remove answer tags, keep content
     prediction = prediction.replace(_ANSWER_START_TAG, "").replace(_ANSWER_END_TAG, "")
 
     return prediction.strip()
