@@ -203,6 +203,13 @@ def compute_advantage(
         if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
             adv_kwargs["batch"] = data.batch
+        # SkillRL GiGPO: needs anchor_obs / traj_uid / rewards / active_masks
+        # from non_tensor_batch (written by multi_turn_loop in env mode).
+        if adv_estimator in ("gigpo", "GiGPO"):
+            # Lazily import to trigger @register_adv_est("gigpo") on first use.
+            import gigpo.core_gigpo  # noqa: F401
+            adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
+            adv_kwargs["batch"] = data.batch
         # Add sum_pi_squared for Optimal Token Baseline
         if adv_estimator in (AdvantageEstimator.OPTIMAL_TOKEN_BASELINE, AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE):
             # Check if sum_pi_squared is available

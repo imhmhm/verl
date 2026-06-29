@@ -380,6 +380,101 @@ def step_norm_reward(step_rewards: torch.Tensor,
             else:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
         step_advantages = scores.unsqueeze(-1).tile([1, response_length]) * response_mask
-    
+
     return step_advantages
+
+
+# ---------------------------------------------------------- #
+# -------- verl v0.7.1 advantage-registry adapter ---------- #
+# ---------------------------------------------------------- #
+# Registers GiGPO with verl's ADV_ESTIMATOR_REGISTRY so it is dispatched via
+# `compute_advantage`'s else branch (get_adv_estimator_fn("gigpo")). The
+# adapter matches verl's registered-fn contract (token_level_rewards /
+# response_mask / config / index, plus non_tensor_batch / batch forwarded like
+# GDPO) and internally:
+#   1. computes step discounted returns (Eq.5) from env per-step rewards;
+#   2. reads anchor_obs / traj_index (traj_uid) from non_tensor_batch;
+#   3. calls compute_gigpo_outcome_advantage (Eq.3 + Eq.7 -> Eq.8).
+from verl.trainer.ppo.core_algos import register_adv_est
+
+
+@register_adv_est("gigpo")
+def compute_gigpo_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    config,
+    index,
+    non_tensor_batch=None,
+    batch=None,
+    **kwargs,
+):
+    """Registered GiGPO advantage estimator for verl v0.7.1.
+
+    Expected kwargs forwarded from ``compute_advantage`` else branch:
+      - token_level_rewards, response_mask, config, index (uid)
+      - non_tensor_batch, batch (forwarded for the gigpo/gdpo path)
+
+    Reads from ``non_tensor_batch``:
+      - ``rewards``       : per-step env rewards (for Eq.5 step discounted returns)
+      - ``traj_uid``      : trajectory ids (traj_index)
+      - ``active_masks``  : active step mask
+      - ``anchor_obs``    : per-step anchor state (for Eq.6 step grouping)
+    """
+    if non_tensor_batch is None:
+        raise ValueError(
+            "GiGPO requires non_tensor_batch (anchor_obs/traj_uid/rewards/active_masks). "
+            "Ensure env.enable_env_rollout=True and the env manager writes anchor_obs."
+        )
+    gigpo_cfg = config.gigpo
+    gamma = getattr(config, "gamma", 1.0)
+
+    # Eq.5: step discounted returns, grouped by traj_uid.
+    rewards = np.asarray(non_tensor_batch["rewards"], dtype=np.float32)
+    traj_uids = np.asarray(non_tensor_batch["traj_uid"], dtype=object)
+    active_masks = np.asarray(non_tensor_batch["active_masks"], dtype=np.float32)
+    step_rewards = _step_discounted_returns(rewards, traj_uids, active_masks, gamma)
+    step_rewards = torch.tensor(step_rewards, dtype=torch.float32, device=token_level_rewards.device)
+
+    anchor_obs = non_tensor_batch.get("anchor_obs", None)
+    if anchor_obs is None:
+        raise ValueError(
+            "GiGPO requires non_tensor_batch['anchor_obs']. "
+            "Ensure the env manager exposes anchor observations (GiGPO only)."
+        )
+    traj_index = traj_uids
+
+    advantages, returns = compute_gigpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        step_rewards=step_rewards,
+        response_mask=response_mask,
+        anchor_obs=anchor_obs,
+        index=index,
+        traj_index=traj_index,
+        step_advantage_w=gigpo_cfg.get("step_advantage_w", 1.0),
+        mode=gigpo_cfg.get("mode", "mean_norm"),
+        enable_similarity=gigpo_cfg.get("enable_similarity", False),
+        similarity_thresh=gigpo_cfg.get("similarity_thresh", 0.95),
+    )
+    return advantages, returns
+
+
+def _step_discounted_returns(rewards, traj_uids, active_masks, gamma):
+    """Eq.5 inlined (independent of DataProto) for the registry adapter."""
+    returns_by_traj = {}
+    unique_uids = np.unique(traj_uids)
+    for uid in unique_uids:
+        traj_indices = np.where(traj_uids == uid)[0]
+        traj_rewards = rewards[traj_indices]
+        traj_returns = np.zeros_like(traj_rewards)
+        running_return = 0.0
+        for t in reversed(range(len(traj_rewards))):
+            running_return = traj_rewards[t] + gamma * running_return
+            traj_returns[t] = running_return
+        returns_by_traj[uid] = traj_returns
+    all_returns = np.zeros_like(rewards)
+    for i, uid in enumerate(traj_uids):
+        traj_indices = np.where(traj_uids == uid)[0]
+        idx_in_traj = np.where(traj_indices == i)[0][0]
+        all_returns[i] = returns_by_traj[uid][idx_in_traj]
+    return all_returns
 
