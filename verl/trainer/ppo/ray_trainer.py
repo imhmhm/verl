@@ -245,6 +245,9 @@ class RayPPOTrainer:
         collate_fn=None,
         train_sampler: Optional[Sampler] = None,
         device_name=None,
+        traj_collector=None,
+        envs=None,
+        val_envs=None,
     ):
         """
         Initialize distributed PPO trainer with Ray backend.
@@ -286,6 +289,13 @@ class RayPPOTrainer:
         self.use_critic = need_critic(self.config)
         self.ray_worker_group_cls = ray_worker_group_cls
         self.device_name = device_name if device_name else self.config.trainer.device
+        # SkillRL env-driven rollout: when env.enable_env_rollout is True, the
+        # driver runs a gym env state machine via TrajectoryCollector instead of
+        # the async tool-calling AgentLoopManager. See docs/SkillRL_适配verl_v0.7.1_NPU方案.md §5.3.
+        self.traj_collector = traj_collector
+        self.envs = envs
+        self.val_envs = val_envs
+        self.enable_env_rollout = bool(self.config.env.get("enable_env_rollout", False)) if hasattr(self.config, "env") else False
         self.validation_generations_logger = ValidationGenerationsLogger(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -510,6 +520,8 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
         sample_uids = []
+        # SkillRL: per-task success_rate collected for skill evolution.
+        success_rate_dict = {}
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -540,15 +552,25 @@ class RayPPOTrainer:
             }
             print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
 
-            # pad to be divisible by dp_size
-            size_divisor = self.config.actor_rollout_ref.rollout.agent.num_workers
-            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
-            test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
+            if self.enable_env_rollout:
+                # SkillRL env-driven validation rollout on the driver.
+                test_output_gen_batch_padded = self.traj_collector.multi_turn_loop(
+                    gen_batch=test_gen_batch,
+                    actor_rollout_wg=self.actor_rollout_wg,
+                    envs=self.val_envs,
+                    is_train=False,
+                )
+                pad_size = 0
+            else:
+                # pad to be divisible by dp_size
+                size_divisor = self.config.actor_rollout_ref.rollout.agent.num_workers
+                test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, size_divisor)
+                test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
 
-            if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
-                # for colocate reward models, we need to sleep rollout model
-                # to spare GPU memory for reward model
-                self.checkpoint_manager.sleep_replicas()
+                if self.use_rm and "rm_scores" not in test_output_gen_batch_padded.batch.keys():
+                    # for colocate reward models, we need to sleep rollout model
+                    # to spare GPU memory for reward model
+                    self.checkpoint_manager.sleep_replicas()
                 batch_reward = self._compute_reward_colocate(test_output_gen_batch_padded)
                 test_output_gen_batch_padded = test_output_gen_batch_padded.union(batch_reward)
                 # wake up rollout model
@@ -596,6 +618,13 @@ class RayPPOTrainer:
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
+            # SkillRL: collect per-task success_rate from env success_evaluator.
+            for k in test_batch.non_tensor_batch.keys():
+                if "success_rate" in k:
+                    if k not in success_rate_dict:
+                        success_rate_dict[k] = []
+                    success_rate_dict[k].append(float(np.mean(test_batch.non_tensor_batch[k])))
+
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         # dump generations
@@ -622,6 +651,18 @@ class RayPPOTrainer:
                 "reward_extra_infos_dict": reward_extra_infos_dict,
             }
         data_sources = np.concatenate(data_source_lst, axis=0)
+        # SkillRL pillar C: evolve skill bank from validation failures
+        # (default path when update_skills_from_train is False).
+        if self.enable_env_rollout and self.config.env.get("skills_only_memory", {}).get(
+            "enable_dynamic_update", False
+        ) and not self.config.env.skills_only_memory.get("update_skills_from_train", False):
+            success_rate = {k: float(np.mean(v)) for k, v in success_rate_dict.items()}
+            self._update_skills_from_validation(
+                sample_inputs=sample_inputs,
+                sample_outputs=sample_outputs,
+                sample_scores=sample_scores,
+                success_rate=success_rate,
+            )
         return self._val_metrics_update(data_sources, sample_uids, reward_extra_infos_dict, sample_turns)
 
     def _val_metrics_update(self, data_sources, sample_uids, reward_extra_infos_dict, sample_turns):
@@ -818,42 +859,242 @@ class RayPPOTrainer:
 
         # create async rollout manager and request scheduler
         # Note: mode is always "async" since sync mode is deprecated
-        self.async_rollout_mode = True
-
-        # Support custom AgentLoopManager via config
-        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
-        if manager_class_fqn:
-            AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+        # SkillRL: when env.enable_env_rollout is set, skip the async
+        # AgentLoopManager entirely — the driver drives a gym env via
+        # TrajectoryCollector.multi_turn_loop using the synchronous worker
+        # generate_sequences path. async_rollout_manager stays None.
+        if self.enable_env_rollout:
+            self.async_rollout_mode = False
+            self.async_rollout_manager = None
+            self.checkpoint_manager = None
         else:
-            from verl.experimental.agent_loop import AgentLoopManager
+            self.async_rollout_mode = True
 
-        # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
-        # agent_reward_loop: streaming reward computation with actor rollout
-        # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-        enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+            # Support custom AgentLoopManager via config
+            manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+            if manager_class_fqn:
+                AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
+            else:
+                from verl.experimental.agent_loop import AgentLoopManager
 
-        # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
-        # to stream reward computation with actor rollout
-        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
-        self.async_rollout_manager = AgentLoopManager.create(
-            config=self.config,
-            worker_group=self.actor_rollout_wg,
-            rollout_resource_pool=actor_rollout_resource_pool,
-            reward_loop_worker_handles=reward_loop_worker_handles,
-        )
-        checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-        self.checkpoint_manager = CheckpointEngineManager(
-            config=checkpoint_engine_config,
-            trainer=self.actor_rollout_wg,
-            replicas=self.async_rollout_manager.rollout_replicas,
-        )
+            # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
+            # agent_reward_loop: streaming reward computation with actor rollout
+            # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
+            enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+
+            # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
+            # to stream reward computation with actor rollout
+            reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+            self.async_rollout_manager = AgentLoopManager.create(
+                config=self.config,
+                worker_group=self.actor_rollout_wg,
+                rollout_resource_pool=actor_rollout_resource_pool,
+                reward_loop_worker_handles=reward_loop_worker_handles,
+            )
+            checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+            self.checkpoint_manager = CheckpointEngineManager(
+                config=checkpoint_engine_config,
+                trainer=self.actor_rollout_wg,
+                replicas=self.async_rollout_manager.rollout_replicas,
+            )
 
         # sleep all replicas to load checkpoint
-        self.checkpoint_manager.sleep_replicas()
+        if self.checkpoint_manager is not None:
+            self.checkpoint_manager.sleep_replicas()
+
+    # ------------------------------------------------------------------ #
+    # SkillRL skill-evolution hooks (pillar C) — ported verbatim from    #
+    # SkillRL's ray_trainer.py. Triggered when *_success_rate < threshold.#
+    # New skills are written to the TRAIN env's retrieval_memory only.   #
+    # ------------------------------------------------------------------ #
+    def _update_skills_from_validation(
+        self,
+        sample_inputs: list,
+        sample_outputs: list,
+        sample_scores: list,
+        success_rate: dict,
+    ):
+        """Update the skill bank using validation results.
+
+        Only triggers when at least one task type's success rate is below the
+        configured threshold. New skills are added to the training env memory
+        only — not to val_envs — to avoid inflating future validation scores
+        with skills specifically tuned to the validation set.
+        """
+        if not self.enable_env_rollout or not hasattr(self.config, "env"):
+            return
+        update_config = self.config.env.skills_only_memory
+        threshold = update_config.get("update_threshold", 0.5)
+
+        if not success_rate:
+            print("[SkillUpdate] No success_rate metrics found in validation results, skipping update")
+            return
+
+        needs_update = False
+        low_success_tasks = []
+        for task_key, rate in success_rate.items():
+            if rate < threshold:
+                needs_update = True
+                task_type = task_key.replace("_success_rate", "")
+                low_success_tasks.append(task_type)
+
+        if not needs_update:
+            print(f"[SkillUpdate] All task success rates above {threshold}, skipping update")
+            return
+
+        print(f"[SkillUpdate] Low success tasks: {low_success_tasks}, triggering skill update...")
+
+        failed_trajectories = self._collect_failed_trajectories(sample_inputs, sample_outputs, sample_scores)
+        if not failed_trajectories:
+            print("[SkillUpdate] No failed trajectories found")
+            return
+
+        if not hasattr(self, "skill_updater"):
+            from agent_system.memory.skill_updater import SkillUpdater
+
+            self.skill_updater = SkillUpdater(max_new_skills_per_update=update_config.get("max_new_skills", 3))
+
+        if not (hasattr(self, "envs") and hasattr(self.envs, "retrieval_memory") and self.envs.retrieval_memory):
+            print("[SkillUpdate] No retrieval_memory found in training envs, cannot determine current skills")
+            return
+
+        print(f"[SkillUpdate] Analyzing {len(failed_trajectories)} failed trajectories...")
+        new_skills = self.skill_updater.analyze_failures(
+            failed_trajectories=failed_trajectories,
+            current_skills=self.envs.retrieval_memory.skills,
+        )
+
+        if new_skills:
+            self.envs.retrieval_memory.add_skills(new_skills, category="general")
+            print(f"[SkillUpdate] Added {len(new_skills)} new skills to training envs")
+            save_dir = self.config.trainer.get("default_local_dir", "./outputs")
+            save_path = os.path.join(save_dir, f"updated_skills_step{self.global_steps}.json")
+            self.envs.retrieval_memory.save_skills(save_path)
+            print(f"[SkillUpdate] Saved updated skill bank to {save_path}")
+        else:
+            print("[SkillUpdate] No new skills generated")
+
+    def _update_skills_from_training(self, batch):
+        """Update the skill bank using training batch results (no val leakage)."""
+        if not self.enable_env_rollout or not hasattr(self.config, "env"):
+            return
+        update_config = self.config.env.skills_only_memory
+        threshold = update_config.get("update_threshold", 0.5)
+
+        success_rate = {}
+        for k in batch.non_tensor_batch.keys():
+            if "success_rate" in k:
+                success_rate[k] = np.mean(batch.non_tensor_batch[k])
+
+        if not success_rate:
+            return
+
+        needs_update = any(rate < threshold for rate in success_rate.values())
+        if not needs_update:
+            return
+
+        inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+        outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+        if "token_level_scores" not in batch.batch:
+            return
+        scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+
+        failed_trajectories = self._collect_failed_trajectories(inputs, outputs, scores)
+        if not failed_trajectories:
+            return
+
+        if not hasattr(self, "skill_updater"):
+            from agent_system.memory.skill_updater import SkillUpdater
+
+            self.skill_updater = SkillUpdater(max_new_skills_per_update=update_config.get("max_new_skills", 3))
+
+        if not (hasattr(self, "envs") and hasattr(self.envs, "retrieval_memory") and self.envs.retrieval_memory):
+            return
+        retrieval_memory = self.envs.retrieval_memory
+
+        print(f"[SkillUpdate-Train] Analyzing {len(failed_trajectories)} failed trajectories...")
+        new_skills = self.skill_updater.analyze_failures(
+            failed_trajectories=failed_trajectories,
+            current_skills=retrieval_memory.skills,
+        )
+        if new_skills:
+            retrieval_memory.add_skills(new_skills, category="general")
+            save_dir = self.config.trainer.get("default_local_dir", "./outputs")
+            save_path = os.path.join(save_dir, f"updated_skills_step{self.global_steps}.json")
+            retrieval_memory.save_skills(save_path)
+            print(f"[SkillUpdate-Train] Added {len(new_skills)} skills, saved to {save_path}")
+
+    def _collect_failed_trajectories(self, inputs: list, outputs: list, scores: list) -> list:
+        """Collect failed trajectories for skill analysis (capped at 10)."""
+        failed = []
+        for inp, out, score in zip(inputs, outputs, scores):
+            if score <= 0:
+                failed.append(
+                    {
+                        "task": self._extract_task_description(inp),
+                        "trajectory": self._parse_conversation_to_steps(inp, out),
+                        "task_type": self._detect_task_type_from_input(inp),
+                    }
+                )
+        return failed[:10]
+
+    def _extract_task_description(self, inp: str) -> str:
+        import re
+
+        patterns = [
+            r"(?:Your task is to|Task:|task is to|you need to)[:\s]+(.*?)(?:\n|$)",
+            r"(?:goal|objective)[:\s]+(.*?)(?:\n|$)",
+        ]
+        for pat in patterns:
+            m = re.search(pat, inp, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()[:1000]
+        for marker in ("<|im_start|>user\n", "\nHuman: ", "\nUser: "):
+            idx = inp.find(marker)
+            if idx >= 0:
+                start = idx + len(marker)
+                return inp[start : start + 1000]
+        return inp[:1000]
+
+    def _parse_conversation_to_steps(self, inp: str, out: str) -> list:
+        import re
+
+        steps = []
+        user_turns = re.findall(r"<\|im_start\|>user\n(.*?)<\|im_end\|>", inp, re.DOTALL)
+        asst_turns = re.findall(r"<\|im_start\|>assistant\n(.*?)<\|im_end\|>", inp, re.DOTALL)
+        if user_turns and asst_turns:
+            for obs, act in zip(user_turns, asst_turns):
+                steps.append({"action": act.strip()[:1500], "observation": obs.strip()[:800]})
+            steps.append({"action": out[:2000], "observation": ""})
+            return steps
+        user_turns = re.findall(r"(?:Human|User):\s*(.*?)(?=(?:Human|User|Assistant):|$)", inp, re.DOTALL | re.IGNORECASE)
+        asst_turns = re.findall(r"Assistant:\s*(.*?)(?=(?:Human|User|Assistant):|$)", inp, re.DOTALL | re.IGNORECASE)
+        if user_turns and asst_turns:
+            for obs, act in zip(user_turns, asst_turns):
+                steps.append({"action": act.strip()[:1500], "observation": obs.strip()[:800]})
+            steps.append({"action": out[:2000], "observation": ""})
+            return steps
+        steps.append({"action": "", "observation": inp[:3000]})
+        steps.append({"action": out[:2000], "observation": ""})
+        return steps
+
+    def _detect_task_type_from_input(self, inp: str) -> str:
+        inp_lower = inp.lower()
+        if "clean" in inp_lower:
+            return "clean"
+        elif "heat" in inp_lower:
+            return "heat"
+        elif "cool" in inp_lower:
+            return "cool"
+        elif "look at" in inp_lower and ("lamp" in inp_lower or "light" in inp_lower):
+            return "look_at_obj_in_light"
+        elif "examine" in inp_lower:
+            return "examine"
+        else:
+            return "pick_and_place"
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
-
         # path: given_path + `/global_step_{global_steps}` + `/actor`
         local_global_step_folder = os.path.join(
             self.config.trainer.default_local_dir, f"global_step_{self.global_steps}"
@@ -1249,7 +1490,8 @@ class RayPPOTrainer:
 
         # load checkpoint and update weights before doing anything
         self._load_checkpoint()
-        self.checkpoint_manager.update_weights(self.global_steps)
+        if self.checkpoint_manager is not None:
+            self.checkpoint_manager.update_weights(self.global_steps)
 
         current_epoch = self.global_steps // len(self.train_dataloader)
 
@@ -1316,15 +1558,25 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
-                        if curr_step_profile:
-                            self.async_rollout_manager.start_profile()
-                        gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                        self.checkpoint_manager.sleep_replicas()
-                        if curr_step_profile:
-                            self.async_rollout_manager.stop_profile()
+                        if self.enable_env_rollout:
+                            # SkillRL env-driven multi-turn rollout on the driver.
+                            gen_batch_output = self.traj_collector.multi_turn_loop(
+                                gen_batch=gen_batch,
+                                actor_rollout_wg=self.actor_rollout_wg,
+                                envs=self.envs,
+                                is_train=True,
+                            )
+                            gen_batch_output.meta_info.setdefault("timing", {})
+                        else:
+                            if curr_step_profile:
+                                self.async_rollout_manager.start_profile()
+                            gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                            self.checkpoint_manager.sleep_replicas()
+                            if curr_step_profile:
+                                self.async_rollout_manager.stop_profile()
 
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                            timing_raw.update(gen_batch_output.meta_info["timing"])
+                            gen_batch_output.meta_info.pop("timing", None)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):
@@ -1493,6 +1745,18 @@ class RayPPOTrainer:
                             config=self.config.algorithm,
                         )
 
+                        # SkillRL pillar C: evolve the skill bank from training-batch
+                        # failures (no val leakage). Triggered at skill_update_freq
+                        # when success_rate < update_threshold.
+                        if self.enable_env_rollout and self.config.env.get("skills_only_memory", {}).get(
+                            "enable_dynamic_update", False
+                        ) and self.config.env.skills_only_memory.get("update_skills_from_train", False):
+                            skill_update_freq = self.config.env.skills_only_memory.get(
+                                "skill_update_freq", self.config.trainer.get("test_freq", 5)
+                            )
+                            if self.global_steps > 0 and self.global_steps % skill_update_freq == 0:
+                                self._update_skills_from_training(batch)
+
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1530,7 +1794,8 @@ class RayPPOTrainer:
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
-                            self.checkpoint_manager.update_weights(self.global_steps)
+                            if self.checkpoint_manager is not None:
+                                self.checkpoint_manager.update_weights(self.global_steps)
 
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

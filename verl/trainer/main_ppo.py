@@ -339,6 +339,20 @@ class TaskRunner:
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
+        # SkillRL env-driven rollout assembly: when config.env.enable_env_rollout
+        # is set, build the gym envs + TrajectoryCollector on the driver and pass
+        # them to the trainer (bypassing the async AgentLoopManager).
+        envs = None
+        val_envs = None
+        traj_collector = None
+        enable_env_rollout = bool(getattr(config, "env", {}).get("enable_env_rollout", False))
+        if enable_env_rollout:
+            from agent_system.environments import make_envs
+            from agent_system.multi_turn_rollout import TrajectoryCollector
+
+            envs, val_envs = make_envs(config)
+            traj_collector = TrajectoryCollector(config=config, tokenizer=tokenizer, processor=processor)
+
         # Initialize the PPO trainer.
         trainer = RayPPOTrainer(
             config=config,
@@ -351,6 +365,9 @@ class TaskRunner:
             val_dataset=val_dataset,
             collate_fn=collate_fn,
             train_sampler=train_sampler,
+            traj_collector=traj_collector,
+            envs=envs,
+            val_envs=val_envs,
         )
         # Initialize the workers of the trainer.
         trainer.init_workers()
