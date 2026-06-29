@@ -342,13 +342,21 @@ class TaskRunner:
         # SkillRL env-driven rollout assembly: when config.env.enable_env_rollout
         # is set, build the gym envs + TrajectoryCollector on the driver and pass
         # them to the trainer (bypassing the async AgentLoopManager).
+        #
+        # The SkillRL task code (agent_system/ gigpo/ memory_data/ skill_generation/)
+        # lives under examples/skillrl/ — verl convention: task-specific code in
+        # examples/, framework code in verl/. examples/skillrl is a package
+        # (examples/__init__.py + examples/skillrl/__init__.py), so it resolves as
+        # examples.skillrl.agent_system / examples.skillrl.gigpo in any process
+        # whose cwd is the repo root (the normal `python -m verl.trainer.main_ppo`
+        # launch), including Ray reward-loop workers.
         envs = None
         val_envs = None
         traj_collector = None
         enable_env_rollout = bool(getattr(config, "env", {}).get("enable_env_rollout", False))
         if enable_env_rollout:
-            from agent_system.environments import make_envs
-            from agent_system.multi_turn_rollout import TrajectoryCollector
+            from examples.skillrl.agent_system.environments import make_envs
+            from examples.skillrl.agent_system.multi_turn_rollout import TrajectoryCollector
 
             envs, val_envs = make_envs(config)
             traj_collector = TrajectoryCollector(config=config, tokenizer=tokenizer, processor=processor)

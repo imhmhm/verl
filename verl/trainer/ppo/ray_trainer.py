@@ -207,7 +207,7 @@ def compute_advantage(
         # from non_tensor_batch (written by multi_turn_loop in env mode).
         if adv_estimator in ("gigpo", "GiGPO"):
             # Lazily import to trigger @register_adv_est("gigpo") on first use.
-            import gigpo.core_gigpo  # noqa: F401
+            import examples.skillrl.gigpo.core_gigpo as _gigpo  # noqa: F401  # noqa: F401
             adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
             adv_kwargs["batch"] = data.batch
         # Add sum_pi_squared for Optimal Token Baseline
@@ -963,7 +963,7 @@ class RayPPOTrainer:
             return
 
         if not hasattr(self, "skill_updater"):
-            from agent_system.memory.skill_updater import SkillUpdater
+            from examples.skillrl.agent_system.memory.skill_updater import SkillUpdater
 
             self.skill_updater = SkillUpdater(max_new_skills_per_update=update_config.get("max_new_skills", 3))
 
@@ -1017,7 +1017,7 @@ class RayPPOTrainer:
             return
 
         if not hasattr(self, "skill_updater"):
-            from agent_system.memory.skill_updater import SkillUpdater
+            from examples.skillrl.agent_system.memory.skill_updater import SkillUpdater
 
             self.skill_updater = SkillUpdater(max_new_skills_per_update=update_config.get("max_new_skills", 3))
 

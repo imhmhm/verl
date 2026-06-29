@@ -82,7 +82,7 @@ python3 -m verl.trainer.main_ppo \
     +env.skills_only_memory.skill_update_freq=5 \
     reward.reward_manager.source=importlib \
     reward.reward_manager.name=EpisodeRewardManager \
-    reward.reward_manager.module.path=pkg://agent_system.reward_manager.episode \
+    reward.reward_manager.module.path=pkg://examples.skillrl.agent_system.reward_manager.episode \
     trainer.critic_warmup=0 \
     trainer.logger=[console,wandb] \
     trainer.project_name=verl_agent_skillrl \
