@@ -598,6 +598,12 @@ class RayPPOTrainer:
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
 
             # evaluate using reward_function
+            # SkillRL env mode: compute rule-based reward via the reward_loop_manager
+            # (EpisodeRewardManager reads env episode_rewards) since the async
+            # rollout manager is bypassed.
+            if self.enable_env_rollout and "rm_scores" not in test_batch.batch.keys():
+                test_batch_reward = self._compute_reward_colocate(test_batch)
+                test_batch = test_batch.union(test_batch_reward)
             reward_tensor, reward_extra_info = extract_reward(test_batch)
 
             scores = reward_tensor.sum(-1).cpu().tolist()
@@ -1623,14 +1629,18 @@ class RayPPOTrainer:
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
                     # get images_seqlens
                     images_seqlens_all = []
-                    for multi_modal_input in batch.non_tensor_batch["multi_modal_inputs"]:
+                    for multi_modal_input in batch.non_tensor_batch.get("multi_modal_inputs", []):
                         if "image_grid_thw" not in multi_modal_input.keys():
                             continue
                         images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
                     batch.meta_info["images_seqlens"] = images_seqlens_all
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
-                        if self.use_rm and "rm_scores" not in batch.batch.keys():
+                        # SkillRL env mode: always compute rule-based reward via the
+                        # reward_loop_manager (EpisodeRewardManager reads env
+                        # episode_rewards) even when use_rm is False.
+                        need_reward_compute = (self.use_rm or self.enable_env_rollout) and "rm_scores" not in batch.batch.keys()
+                        if need_reward_compute:
                             batch_reward = self._compute_reward_colocate(batch)
                             batch = batch.union(batch_reward)
 
