@@ -24,14 +24,17 @@ import argparse
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', default='visual', choices=['visual', 'text'])
-    parser.add_argument('--local_dir', default='~/data/verl-agent/')
+    parser.add_argument("--local_dataset_path", default=None, help="The local path to the raw dataset, if it exists.")
+    parser.add_argument(
+        "--local_save_dir", default="~/data/skillrl", help="The save directory for the preprocessed dataset."
+    )
     parser.add_argument('--hdfs_dir', default=None)
     parser.add_argument('--train_data_size', default=256, type=int)
     parser.add_argument('--val_data_size', default=256, type=int)
 
     args = parser.parse_args()
     print(f"processing data for mode: {args.mode}")
-    args.local_dir = os.path.join(args.local_dir, args.mode)
+    args.local_save_dir = os.path.join(args.local_save_dir, args.mode)
 
     data_source = 'hiyouga/geometry3k'
     """
@@ -40,7 +43,10 @@ if __name__ == '__main__':
     See details: https://github.com/langfengQ/verl-agent?tab=readme-ov-file#2-data-preparation
     """
 
-    dataset = datasets.load_dataset(data_source)
+    if args.local_dataset_path is not None:
+        dataset = datasets.load_dataset(args.local_dataset_path)
+    else:
+        dataset = datasets.load_dataset(data_source)
 
     train_dataset = dataset['train'].select(range(args.train_data_size))
     test_dataset = dataset['test'].select(range(args.val_data_size))
@@ -93,12 +99,12 @@ if __name__ == '__main__':
     train_dataset = train_dataset.map(function=make_map_fn('train'), with_indices=True, num_proc=8)
     test_dataset = test_dataset.map(function=make_map_fn('test'), with_indices=True, num_proc=8)
 
-    local_dir = args.local_dir
+    local_save_dir = args.local_save_dir
     hdfs_dir = args.hdfs_dir
 
-    train_dataset.to_parquet(os.path.join(local_dir, 'train.parquet'))
-    test_dataset.to_parquet(os.path.join(local_dir, 'test.parquet'))
+    train_dataset.to_parquet(os.path.join(local_save_dir, 'train.parquet'))
+    test_dataset.to_parquet(os.path.join(local_save_dir, 'test.parquet'))
 
     if hdfs_dir is not None:
         makedirs(hdfs_dir)
-        copy(src=local_dir, dst=hdfs_dir)
+        copy(src=local_save_dir, dst=hdfs_dir)

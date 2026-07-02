@@ -108,6 +108,32 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     return data, metrics
 
 
+def apply_invalid_action_penalty(data: DataProto, invalid_action_penalty_coef=float):
+    """SkillRL: penalize invalid env actions (is_action_valid=0).
+
+    Ported from SkillRL ray_trainer.py. Subtracts a penalty from the
+    token_level_scores (and step_rewards if present, for GiGPO) at the last
+    valid response token for each trajectory whose env action was invalid.
+    Only meaningful in env-driven rollout mode (env projection writes
+    `is_action_valid` into non_tensor_batch).
+    """
+    reward_tensor = data.batch["token_level_scores"]
+    step_rewards = data.batch["step_rewards"] if "step_rewards" in data.batch.keys() else None
+    for i in range(len(data)):
+        data_item = data[i]
+        prompt_ids = data_item.batch["prompts"]
+        prompt_length = prompt_ids.shape[-1]
+        valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+        action_valids = data_item.non_tensor_batch["is_action_valid"].astype(np.float32)
+        action_invalids = torch.tensor(1 - action_valids, dtype=torch.float32, device=prompt_ids.device).squeeze(0)
+        reward_tensor[i, valid_response_length - 1] -= invalid_action_penalty_coef * action_invalids
+        if step_rewards is not None:
+            step_rewards[i] -= invalid_action_penalty_coef * action_invalids
+    valid_action_ratio = np.mean(data.non_tensor_batch["is_action_valid"].astype(np.float32)).item()
+    metrics = {"episode/valid_action_ratio": valid_action_ratio}
+    return data, metrics
+
+
 def compute_response_mask(data: DataProto):
     """Compute the attention mask for the response part of the sequence.
 
@@ -1722,6 +1748,19 @@ class RayPPOTrainer:
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+
+                        # SkillRL: penalize invalid env actions (env projection
+                        # writes is_action_valid). Only in env-driven rollout mode.
+                        if (
+                            self.enable_env_rollout
+                            and self.config.actor_rollout_ref.actor.get("use_invalid_action_penalty", False)
+                            and "is_action_valid" in batch.non_tensor_batch
+                        ):
+                            batch, invalid_metrics = apply_invalid_action_penalty(
+                                batch,
+                                invalid_action_penalty_coef=self.config.actor_rollout_ref.actor.invalid_action_penalty_coef,
+                            )
+                            metrics.update(invalid_metrics)
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:

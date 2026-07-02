@@ -137,6 +137,8 @@ class ActorConfig(BaseConfig):
         "ppo_infer_micro_batch_size_per_gpu",
         "engine",
         "model_config",
+        "use_invalid_action_penalty",
+        "invalid_action_penalty_coef",
     }
 
     strategy: str = MISSING
@@ -176,6 +178,10 @@ class ActorConfig(BaseConfig):
     rollout_n: int = MISSING  # must be override by sampling config
     model_config: HFModelConfig = field(default_factory=BaseConfig)
     router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)
+    # SkillRL: penalize invalid env actions (env projection writes is_action_valid).
+    # Only effective in env-driven rollout mode (env.enable_env_rollout=True).
+    use_invalid_action_penalty: bool = False
+    invalid_action_penalty_coef: float = 0.1
 
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size
