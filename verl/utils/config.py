@@ -86,17 +86,6 @@ def validate_config(
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
-    # SkillRL env-driven mode: the actual training batch is
-    # train_batch_size * env.rollout.n (multi_turn_loop expands each prompt
-    # into a group of env.rollout.n trajectories), while actor_rollout_ref.
-    # rollout.n stays 1 (batch is already expanded by the env loop). Use the
-    # effective batch size for validation so ppo_mini_batch_size checks pass.
-    _env_cfg = getattr(config, "env", None)
-    _env_rollout_n = 1
-    if _env_cfg is not None and _env_cfg.get("enable_env_rollout", False):
-        _env_rollout_n = _env_cfg.get("rollout", {}).get("n", 1)
-    effective_train_batch_size = config.data.train_batch_size * _env_rollout_n
-
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if config.actor_rollout_ref.actor.strategy == "megatron":
             model_parallel_size = (
@@ -117,9 +106,7 @@ def validate_config(
             minimal_bsz = n_gpus
 
         # 1. Check total batch size for data correctness
-        # SkillRL env mode: effective batch = train_batch_size * env.rollout.n
-        # (actor_rollout_ref.rollout.n stays 1; env loop does the expansion).
-        real_train_batch_size = effective_train_batch_size
+        real_train_batch_size = config.data.train_batch_size * config.actor_rollout_ref.rollout.n
         assert real_train_batch_size % minimal_bsz == 0, (
             f"real_train_batch_size ({real_train_batch_size}) must be divisible by minimal possible batch size "
             f"({minimal_bsz})"
@@ -160,10 +147,8 @@ def validate_config(
                 )
 
     # Actor validation done in ActorConfig.__post_init__ and validate()
-    # (effective_train_batch_size computed above, accounts for env.rollout.n
-    # in env-driven mode)
     actor_config = omega_conf_to_dataclass(config.actor_rollout_ref.actor)
-    actor_config.validate(n_gpus, effective_train_batch_size, config.actor_rollout_ref.model)
+    actor_config.validate(n_gpus, config.data.train_batch_size, config.actor_rollout_ref.model)
 
     if not config.actor_rollout_ref.actor.use_dynamic_bsz:
         if use_reference_policy:
@@ -187,7 +172,7 @@ def validate_config(
     # critic
     if use_critic:
         critic_config = omega_conf_to_dataclass(config.critic)
-        critic_config.validate(n_gpus, effective_train_batch_size)
+        critic_config.validate(n_gpus, config.data.train_batch_size)
 
     if config.data.get("val_batch_size", None) is not None:
         print(
