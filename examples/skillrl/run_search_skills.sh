@@ -29,7 +29,7 @@ group_size=4
 TRAIN_DATA="${TRAIN_DATA:-$HOME/data/searchR1_processed_direct/train.parquet}"
 VAL_DATA="${VAL_DATA:-$HOME/data/searchR1_processed_direct/test.parquet}"
 
-python3 -m verl.trainer.main_ppo \
+python3 -m examples.skillrl.main_skillrl \
     algorithm.adv_estimator=grpo \
     data.train_files=$TRAIN_DATA \
     data.val_files=$VAL_DATA \

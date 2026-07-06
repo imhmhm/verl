@@ -29,7 +29,7 @@ mode="mean_std_norm"            # "mean_norm" (w/o std, LOO) or "mean_std_norm" 
 enable_similarity=True          # similarity-based step grouping for search
 similarity_thresh=0.9
 
-python3 -m verl.trainer.main_ppo \
+python3 -m examples.skillrl.main_skillrl \
     algorithm.adv_estimator=gigpo \
     +algorithm.gigpo.step_advantage_w=1.0 \
     +algorithm.gigpo.mode=$mode \
