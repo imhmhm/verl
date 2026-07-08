@@ -19,8 +19,12 @@ from examples.skillrl.skillrl_ray_trainer import RaySkillRLTrainer
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
 
+from verl.utils.device import auto_set_device
+
+
 @hydra.main(config_path="config", config_name="skillrl", version_base=None)
 def main(config):
+    auto_set_device(config)
     run_skillrl(config)
 
 
