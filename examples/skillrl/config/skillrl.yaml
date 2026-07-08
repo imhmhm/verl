@@ -73,13 +73,15 @@ data:
 algorithm:
   adv_estimator: grpo
   use_kl_in_reward: False
-  # gigpo 子段 (adv_estimator=gigpo 时用)
+  gamma: 1.0
+  filter_groups:
+    enable: False
+    max_num_gen_batches: 10
   gigpo:
     step_advantage_w: 1.0
     mode: mean_std_norm
     enable_similarity: False
     similarity_thresh: 0.95
-  gamma: 1.0
 
 # ---- actor / rollout / ref ----
 actor_rollout_ref:
