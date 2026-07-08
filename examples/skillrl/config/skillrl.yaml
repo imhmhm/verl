@@ -1,0 +1,131 @@
+# SkillRL on verl v0.7.1 -通用配置。
+# 继承 verl ppo_trainer 默认配置，定义 SkillRL 的 env 段 schema。
+# 各任务脚本通过命令行覆盖 env.env_name / env.max_steps / env.rollout.n 等。
+#
+# Usage: python -m examples.skillrl.main_skillrl --config-name skillrl \
+#          env.env_name=alfworld/AlfredTWEnv actor_rollout_ref.model.path=$MODEL_PATH ...
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+# ---- SkillRL env config (verl 核心无 env 段，这里定义) ----
+env:
+  enable_env_rollout: True
+  env_name: alfworld/AlfredTWEnv      # 脚本覆盖: Webshop / search
+  seed: 0
+  max_steps: 50                       # 脚本覆盖: 15 (webshop) / 4 (search)
+  history_length: 2
+  resources_per_worker:
+    num_cpus: 0.1
+    num_gpus: 0
+  rollout:
+    n: 8                              # GRPO group size, 脚本按需覆盖
+  # alfworld 子段 (env_name=alfworld 时用)
+  alfworld:
+    eval_dataset: eval_in_distribution
+  # search 子段 (env_name=search 时用)
+  search:
+    search_url: http://127.0.0.1:8000/retrieve
+    topk: 3
+    timeout: 30
+    log_requests: false
+  # webshop 子段 (env_name=Webshop 时用)
+  webshop:
+    use_small: False
+    human_goals: True
+  # 技能记忆 (pillar B/C)
+  use_skills_only_memory: True
+  skills_only_memory:
+    retrieval_mode: template
+    top_k: 6
+    task_specific_top_k: 4
+    enable_dynamic_update: True
+    update_skills_from_train: True
+    update_threshold: 0.4
+    max_new_skills: 3
+    skill_update_freq: 5
+    skills_json_path: examples/skillrl/memory_data/alfworld/claude_style_skills.json
+    embedding_device: cpu
+
+# ---- reward manager (R3: EpisodeRewardManager) ----
+reward:
+  reward_manager:
+    source: importlib
+    name: EpisodeRewardManager
+    module:
+      path: pkg://examples.skillrl.agent_system.reward_manager.episode
+
+# ---- data (脚本覆盖 train_files/val_files) ----
+data:
+  max_prompt_length: 4096
+  max_response_length: 512
+  filter_overlong_prompts: True
+  truncation: error
+  return_raw_chat: True
+  train_batch_size: 16
+  val_batch_size: 64
+
+# ---- algorithm (脚本可覆盖 adv_estimator=gigpo) ----
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: False
+  # gigpo 子段 (adv_estimator=gigpo 时用)
+  gigpo:
+    step_advantage_w: 1.0
+    mode: mean_std_norm
+    enable_similarity: False
+    similarity_thresh: 0.95
+  gamma: 1.0
+
+# ---- actor / rollout / ref ----
+actor_rollout_ref:
+  hybrid_engine: True
+  actor:
+    optim:
+      lr: 1e-6
+    use_remove_padding: True
+    ppo_mini_batch_size: 16
+    ppo_micro_batch_size_per_gpu: 2
+    use_kl_loss: True
+    kl_loss_coef: 0.01
+    kl_loss_type: low_var_kl
+    use_invalid_action_penalty: True
+    invalid_action_penalty_coef: 0.1
+    fsdp_config:
+      param_offload: True
+      optimizer_offload: True
+  model:
+    enable_gradient_checkpointing: True
+  rollout:
+    log_prob_micro_batch_size_per_gpu: 8
+    tensor_model_parallel_size: 4
+    name: vllm
+    gpu_memory_utilization: 0.5
+    enable_chunked_prefill: True
+    enforce_eager: False
+    max_num_batched_tokens: 8192
+    max_num_seqs: 512
+    val_kwargs:
+      temperature: 0.4
+      do_sample: True
+  ref:
+    log_prob_micro_batch_size_per_gpu: 4
+    fsdp_config:
+      param_offload: True
+
+# ---- trainer ----
+trainer:
+  critic_warmup: 0
+  logger: [console]
+  project_name: verl_agent_skillrl
+  experiment_name: skillrl
+  n_gpus_per_node: 8
+  nnodes: 1
+  save_freq: 10
+  test_freq: 5
+  total_epochs: 150
+  val_before_train: False

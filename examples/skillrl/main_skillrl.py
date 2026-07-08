@@ -19,7 +19,7 @@ from examples.skillrl.skillrl_ray_trainer import RaySkillRLTrainer
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
 
-@hydra.main(config_path="../../verl/trainer/config", config_name="ppo_trainer", version_base=None)
+@hydra.main(config_path="config", config_name="skillrl", version_base=None)
 def main(config):
     run_skillrl(config)
 
