@@ -128,14 +128,9 @@ class TaskRunner:
             config=config.data,
         )
 
-        from torch.utils.data import RandomSampler, SequentialSampler
+        from verl.trainer.main_ppo import create_rl_sampler
 
-        if config.data.shuffle:
-            train_dataloader_generator = __import__("torch").Generator()
-            train_dataloader_generator.manual_seed(config.data.get("seed", 1))
-            train_sampler = RandomSampler(data_source=train_dataset, generator=train_dataloader_generator)
-        else:
-            train_sampler = SequentialSampler(data_source=train_dataset)
+        train_sampler = create_rl_sampler(config.data, train_dataset)
 
         trainer = RaySkillRLTrainer(
             config=config,
