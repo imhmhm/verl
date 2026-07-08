@@ -740,7 +740,27 @@ class RaySkillRLTrainer(RayPPOTrainer):
                     [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                 )
 
-                gen_batch = self._get_gen_batch(batch)
+                if self.enable_env_rollout:
+                    # SkillRL env-driven mode: multi_turn_loop needs gen_batch to
+                    # contain tensor keys (input_ids, attention_mask, position_ids).
+                    # v0.7.1's _get_gen_batch pops only non_tensor keys (batch_keys=[]),
+                    # so we pop tensor keys manually like 0.3.1 did.
+                    batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
+                    non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "data_source"]
+                    if "multi_modal_data" in batch.non_tensor_batch:
+                        non_tensor_batch_keys_to_pop.append("multi_modal_data")
+                    if "raw_prompt" in batch.non_tensor_batch:
+                        non_tensor_batch_keys_to_pop.append("raw_prompt")
+                    if "tools_kwargs" in batch.non_tensor_batch:
+                        non_tensor_batch_keys_to_pop.append("tools_kwargs")
+                    if "env_kwargs" in batch.non_tensor_batch:
+                        non_tensor_batch_keys_to_pop.append("env_kwargs")
+                    gen_batch = batch.pop(
+                        batch_keys=batch_keys_to_pop,
+                        non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
+                    )
+                else:
+                    gen_batch = self._get_gen_batch(batch)
 
                 # pass global_steps to trace
                 gen_batch.meta_info["global_steps"] = self.global_steps
