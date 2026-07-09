@@ -76,13 +76,19 @@ class TaskRunner:
         if enable_env_rollout:
             traj_collector = TrajectoryCollector(config=config, tokenizer=tokenizer, processor=processor)
 
-        # worker classes (same as main_ppo)
+        # worker classes: use non-async ActorRolloutRefWorker for env-driven
+        # mode. v0.7.1's AsyncActorRolloutRefWorker has a running event loop
+        # (uvloop) that conflicts with generate_sequences -> run_until_complete.
+        # The standard path avoids this by never calling worker.generate_
+        # sequences (uses async_rollout_manager HTTP path instead). Our env
+        # loop calls actor_rollout_wg.generate_sequences per step, so we need
+        # the non-async worker.
         if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-            from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker, CriticWorker
-            actor_rollout_cls = AsyncActorRolloutRefWorker
+            from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
+            actor_rollout_cls = ActorRolloutRefWorker
         elif config.actor_rollout_ref.actor.strategy == "megatron":
-            from verl.workers.megatron_workers import AsyncActorRolloutRefWorker, CriticWorker
-            actor_rollout_cls = AsyncActorRolloutRefWorker
+            from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
+            actor_rollout_cls = ActorRolloutRefWorker
         else:
             raise NotImplementedError
 
