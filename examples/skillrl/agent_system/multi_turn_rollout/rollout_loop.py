@@ -303,13 +303,19 @@ class TrajectoryCollector:
             traj_uid (np.ndarray): Trajectory unique identifiers
         """
 
-        batch_size = len(gen_batch.batch)
+        # v0.7.1: gen_batch.batch may be None (RLHFDataset doesn't tokenize;
+        # tokenization happens in preprocess_single_sample via raw_prompt).
+        # Use non_tensor_batch length as batch_size fallback.
+        if gen_batch.batch is not None:
+            batch_size = len(gen_batch.batch)
+        else:
+            batch_size = len(gen_batch.non_tensor_batch['raw_prompt'])
 
         # Initial observations from the environment
         obs, infos = envs.reset(kwargs=gen_batch.non_tensor_batch.pop('env_kwargs', None))
 
         lenght_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
-        assert len(gen_batch.batch) == lenght_obs, f"gen_batch size {len(gen_batch.batch)} does not match obs size {lenght_obs}"
+        assert batch_size == lenght_obs, f"gen_batch size {batch_size} does not match obs size {lenght_obs}"
         
         if self.config.env.rollout.n > 0: # env grouping
             uid_batch = []
