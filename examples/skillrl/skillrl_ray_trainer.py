@@ -263,48 +263,39 @@ class RaySkillRLTrainer(RayPPOTrainer):
 
         # create async rollout manager and request scheduler
         # Note: mode is always "async" since sync mode is deprecated
-        # SkillRL: when env.enable_env_rollout is set, skip the async
-        # AgentLoopManager entirely — the driver drives a gym env via
-        # TrajectoryCollector.multi_turn_loop using the synchronous worker
-        # generate_sequences path. async_rollout_manager stays None.
-        if self.enable_env_rollout:
-            self.async_rollout_mode = False
-            self.async_rollout_manager = None
-            self.checkpoint_manager = None
+        #
+        # SkillRL env-driven mode (route A): KEEP AgentLoopManager creation
+        # (it starts vLLM server actors that generate_sequences depends on).
+        # In fit(), multi_turn_loop replaces async_rollout_manager.generate_
+        # sequences, but the env loop calls actor_rollout_wg.generate_sequences
+        # per step -> rollout_mode() -> resume() -> vllm_server (managed here).
+        self.async_rollout_mode = True
+
+        # Support custom AgentLoopManager via config
+        manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
+        if manager_class_fqn:
+            AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
         else:
-            self.async_rollout_mode = True
+            from verl.experimental.agent_loop import AgentLoopManager
 
-            # Support custom AgentLoopManager via config
-            manager_class_fqn = self.config.actor_rollout_ref.rollout.get("agent", {}).get("agent_loop_manager_class")
-            if manager_class_fqn:
-                AgentLoopManager = load_class_from_fqn(manager_class_fqn, "AgentLoopManager")
-            else:
-                from verl.experimental.agent_loop import AgentLoopManager
-
-            # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
-            # agent_reward_loop: streaming reward computation with actor rollout
-            # two conditions satisfied: (1) no reward model, or (2) reward model with extra resource pool
-            enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
-
-            # if enable_agent_reward_loop, we directly pass reward_loop_workers to agent loop manager
-            # to stream reward computation with actor rollout
-            reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
-            self.async_rollout_manager = AgentLoopManager.create(
-                config=self.config,
-                worker_group=self.actor_rollout_wg,
-                rollout_resource_pool=actor_rollout_resource_pool,
-                reward_loop_worker_handles=reward_loop_worker_handles,
-            )
-            checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
-            self.checkpoint_manager = CheckpointEngineManager(
-                config=checkpoint_engine_config,
-                trainer=self.actor_rollout_wg,
-                replicas=self.async_rollout_manager.rollout_replicas,
-            )
+        # infrastructure overview: https://verl.readthedocs.io/en/latest/advance/reward_loop.html#architecture-design
+        enable_agent_reward_loop = not self.use_rm or self.config.reward.reward_model.enable_resource_pool
+        reward_loop_worker_handles = self.reward_loop_manager.reward_loop_workers if enable_agent_reward_loop else None
+        self.async_rollout_manager = AgentLoopManager.create(
+            config=self.config,
+            worker_group=self.actor_rollout_wg,
+            rollout_resource_pool=actor_rollout_resource_pool,
+            reward_loop_worker_handles=reward_loop_worker_handles,
+        )
+        checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
+        self.checkpoint_manager = CheckpointEngineManager(
+            config=checkpoint_engine_config,
+            trainer=self.actor_rollout_wg,
+            replicas=self.async_rollout_manager.rollout_replicas,
+        )
 
         # sleep all replicas to load checkpoint
-        if self.checkpoint_manager is not None:
-            self.checkpoint_manager.sleep_replicas()
+        self.checkpoint_manager.sleep_replicas()
 
     # ------------------------------------------------------------------ #
     # SkillRL skill-evolution hooks (pillar C) — ported verbatim from    #
