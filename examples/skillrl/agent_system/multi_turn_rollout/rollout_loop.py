@@ -205,7 +205,7 @@ class TrajectoryCollector:
         Returns:
             DataProto: Contains processed batch data with preserved metadata
         """
-        batch_size = len(gen_batch.batch['input_ids'])
+        batch_size = len(gen_batch) if gen_batch.batch is not None else len(gen_batch.non_tensor_batch['raw_prompt'])
         processed_samples = []
         
         # Process each sample in parallel
@@ -326,7 +326,7 @@ class TrajectoryCollector:
             uid_batch = np.array(uid_batch, dtype=object)
         else: # no env grouping, set all to the same uid
             uid = str(uuid.uuid4())
-            uid_batch = np.array([uid for _ in range(len(gen_batch.batch))], dtype=object)
+            uid_batch = np.array([uid for _ in range(batch_size)], dtype=object)
         is_done = np.zeros(batch_size, dtype=bool)
         traj_uid = np.array([str(uuid.uuid4()) for _ in range(batch_size)], dtype=object)
         total_batch_list = [[] for _ in range(batch_size)]
