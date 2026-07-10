@@ -21,14 +21,6 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
 from verl.utils.device import auto_set_device
 
-# v0.7.1's vLLM rollout only supports async server mode (sync generate_sequences
-# was removed in PR #4411). AsyncActorRolloutRefWorker runs uvloop in the worker
-# process, and generate_sequences -> loop.run_until_complete(rollout_mode())
-# fails with "this event loop is already running". nest_asyncio patches
-# run_until_complete to work inside a running event loop.
-import nest_asyncio
-nest_asyncio.apply()
-
 
 @hydra.main(config_path="config", config_name="skillrl", version_base=None)
 def main(config):
@@ -42,15 +34,6 @@ def run_skillrl(config) -> None:
         ray_init_kwargs = config.get("ray_kwargs", {}).get("ray_init", {})
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
-        # Disable uvloop in worker processes and apply nest_asyncio.
-        # v0.7.1's AsyncActorRolloutRefWorker runs uvloop; generate_sequences
-        # calls run_until_complete which fails ("already running") because
-        # uvloop's Cython run_until_complete can't be patched by nest_asyncio.
-        # Switching to standard asyncio lets nest_asyncio work.
-        runtime_env["setup_hook"] = (
-            "import asyncio; asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy()); "
-            "import nest_asyncio; nest_asyncio.apply()"
-        )
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 

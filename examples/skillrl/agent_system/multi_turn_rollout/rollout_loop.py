@@ -334,43 +334,97 @@ class TrajectoryCollector:
         episode_lengths = np.zeros(batch_size, dtype=np.float32)
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
+        # v0.7.1 async server generation: build sampling_params from rollout config
+        rollout_config = self.config.actor_rollout_ref.rollout
+        max_response_length = self.config.data.max_response_length
+        sampling_params = {
+            "temperature": rollout_config.temperature,
+            "top_p": rollout_config.get("top_p", 1.0),
+            "top_k": rollout_config.get("top_k", -1),
+            "max_tokens": max_response_length,
+            "logprobs": rollout_config.get("calculate_log_probs", True),
+        }
+
         # Trajectory collection loop
         for _step in range(self.config.env.max_steps):
             active_masks = np.logical_not(is_done)
 
             batch = self.preprocess_batch(gen_batch=gen_batch, obs=obs)
 
-            batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-            non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
-            if "multi_modal_data" in batch.non_tensor_batch:
-                non_tensor_batch_keys_to_pop.append("multi_modal_data")
-            if "raw_prompt" in batch.non_tensor_batch:
-                non_tensor_batch_keys_to_pop.append("raw_prompt")
-            if "tools_kwargs" in batch.non_tensor_batch:
-                non_tensor_batch_keys_to_pop.append("tools_kwargs")
-            batch_input = batch.pop(
-                batch_keys=batch_keys_to_pop,
-                non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
+            # v0.7.1: generate via async vLLM server (not actor_rollout_wg.generate_sequences).
+            # The sync worker path is removed in v0.7.1 (vLLM only supports async server mode).
+            # We call server_manager.generate() directly with prompt_ids, which sends
+            # HTTP/RPC to the vLLM server actor. No worker event loop conflict.
+            import asyncio as _asyncio
+            from uuid import uuid4 as _uuid4
+
+            async def _generate_one(server_manager, prompt_ids, sp):
+                return await server_manager.generate(
+                    request_id=_uuid4().hex,
+                    prompt_ids=prompt_ids,
+                    sampling_params=sp,
+                )
+
+            # Extract prompt_ids from batch (input_ids tensor, strip left padding)
+            prompt_ids_list = []
+            for i in range(batch_size):
+                ids = batch.batch["input_ids"][i]
+                attn = batch.batch["attention_mask"][i]
+                valid_len = attn.sum().item()
+                valid_ids = ids[-valid_len:].tolist()
+                prompt_ids_list.append(valid_ids)
+
+            # Get server_manager (set by trainer via traj_collector._server_manager)
+            server_manager = getattr(self, "_server_manager", None)
+            if server_manager is None:
+                raise RuntimeError(
+                    "TrajectoryCollector._server_manager not set. "
+                    "Pass async_rollout_manager.server_manager from the trainer."
+                )
+
+            # Batch generate: all prompts concurrently via async vLLM server
+            async def _generate_batch():
+                tasks = [_generate_one(server_manager, pids, dict(sampling_params)) for pids in prompt_ids_list]
+                return await _asyncio.gather(*tasks)
+
+            token_outputs = _asyncio.run(_generate_batch())
+
+            # Build batch_output DataProto from TokenOutput list
+            max_resp_len = max(len(to.token_ids) for to in token_outputs)
+            if max_resp_len == 0:
+                max_resp_len = 1
+
+            responses_tensor = torch.zeros(batch_size, max_resp_len, dtype=torch.long)
+            logprobs_tensor = torch.zeros(batch_size, max_resp_len, dtype=torch.float32)
+            resp_attention_mask = torch.zeros(batch_size, max_resp_len, dtype=torch.long)
+
+            for i, to in enumerate(token_outputs):
+                n = len(to.token_ids)
+                responses_tensor[i, :n] = torch.tensor(to.token_ids, dtype=torch.long)
+                resp_attention_mask[i, :n] = 1
+                if to.log_probs is not None:
+                    logprobs_tensor[i, :n] = torch.tensor(to.log_probs, dtype=torch.float32)
+
+            from tensordict import TensorDict as _TD
+            batch_output = DataProto(
+                batch=_TD({
+                    "responses": responses_tensor,
+                    "rollout_log_probs": logprobs_tensor,
+                    "attention_mask": resp_attention_mask,
+                }, batch_size=[batch_size]),
+                non_tensor_batch={},
             )
-
-            batch_input.meta_info = gen_batch.meta_info
-
-            # pad to be divisible by dp_size
-            batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
-            batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
-            # # unpad
-            batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
 
             batch.non_tensor_batch['uid'] = uid_batch
             batch.non_tensor_batch['traj_uid'] = traj_uid
 
             batch = batch.union(batch_output)
-            
+
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
-            
+
             next_obs, rewards, dones, infos = envs.step(text_actions)
 
-            
+
             if len(rewards.shape) == 2:
                 rewards = rewards.squeeze(1)
             if len(dones.shape) == 2:
@@ -385,14 +439,13 @@ class TrajectoryCollector:
             if 'tool_calling' in infos[0]:
                 tool_callings[active_masks] += np.array([info['tool_calling'] for info in infos], dtype=np.float32)[active_masks]
             # Create reward tensor, only assign rewards for active environments
-            # episode_rewards += torch_to_numpy(rewards) * torch_to_numpy(active_masks)
             episode_rewards[active_masks] += torch_to_numpy(rewards)[active_masks]
             episode_lengths[active_masks] += 1
 
             assert len(rewards) == batch_size, f"env should return rewards for all environments, got {len(rewards)} rewards for {batch_size} environments"
             batch.non_tensor_batch['rewards'] = torch_to_numpy(rewards, is_object=True)
             batch.non_tensor_batch['active_masks'] = torch_to_numpy(active_masks, is_object=True)
-            
+
             # Update episode lengths for active environments
             batch_list: list[dict] = to_list_of_dict(batch)
 
@@ -402,7 +455,7 @@ class TrajectoryCollector:
 
             # Update done states
             is_done = np.logical_or(is_done, dones)
-                
+
             # Update observations for next step
             obs = next_obs
 
