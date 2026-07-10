@@ -42,6 +42,10 @@ def run_skillrl(config) -> None:
         ray_init_kwargs = config.get("ray_kwargs", {}).get("ray_init", {})
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
+        # Apply nest_asyncio in every Ray worker process so that
+        # generate_sequences -> run_until_complete works inside the
+        # worker's running uvloop (AsyncActorRolloutRefWorker).
+        runtime_env["setup_hook"] = "import nest_asyncio; nest_asyncio.apply()"
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
