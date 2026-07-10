@@ -21,6 +21,14 @@ from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
 from verl.utils.device import auto_set_device
 
+# v0.7.1's vLLM rollout only supports async server mode (sync generate_sequences
+# was removed in PR #4411). AsyncActorRolloutRefWorker runs uvloop in the worker
+# process, and generate_sequences -> loop.run_until_complete(rollout_mode())
+# fails with "this event loop is already running". nest_asyncio patches
+# run_until_complete to work inside a running event loop.
+import nest_asyncio
+nest_asyncio.apply()
+
 
 @hydra.main(config_path="config", config_name="skillrl", version_base=None)
 def main(config):
@@ -76,19 +84,17 @@ class TaskRunner:
         if enable_env_rollout:
             traj_collector = TrajectoryCollector(config=config, tokenizer=tokenizer, processor=processor)
 
-        # worker classes: use non-async ActorRolloutRefWorker for env-driven
-        # mode. v0.7.1's AsyncActorRolloutRefWorker has a running event loop
-        # (uvloop) that conflicts with generate_sequences -> run_until_complete.
-        # The standard path avoids this by never calling worker.generate_
-        # sequences (uses async_rollout_manager HTTP path instead). Our env
-        # loop calls actor_rollout_wg.generate_sequences per step, so we need
-        # the non-async worker.
+        # worker classes: use AsyncActorRolloutRefWorker (v0.7.1 vLLM only
+        # supports async server mode; sync generate_sequences is removed).
+        # The event loop conflict ("this event loop is already running") in
+        # generate_sequences -> run_until_complete is resolved by nest_asyncio
+        # (applied in main() before run_skillrl).
         if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker, CriticWorker
-            actor_rollout_cls = ActorRolloutRefWorker
+            from verl.workers.fsdp_workers import AsyncActorRolloutRefWorker, CriticWorker
+            actor_rollout_cls = AsyncActorRolloutRefWorker
         elif config.actor_rollout_ref.actor.strategy == "megatron":
-            from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
-            actor_rollout_cls = ActorRolloutRefWorker
+            from verl.workers.megatron_workers import AsyncActorRolloutRefWorker, CriticWorker
+            actor_rollout_cls = AsyncActorRolloutRefWorker
         else:
             raise NotImplementedError
 
