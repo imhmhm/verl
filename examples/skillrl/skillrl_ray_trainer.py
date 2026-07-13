@@ -297,10 +297,22 @@ class RaySkillRLTrainer(RayPPOTrainer):
         # sleep all replicas to load checkpoint
         self.checkpoint_manager.sleep_replicas()
 
-        # SkillRL: expose async_rollout_manager.server_manager to traj_collector
-        # so multi_turn_loop can call vLLM server directly (async path).
-        if self.traj_collector is not None and hasattr(self.async_rollout_manager, 'server_manager'):
-            self.traj_collector._server_manager = self.async_rollout_manager.server_manager
+        # SkillRL: create AsyncLLMServerManager for traj_collector so
+        # multi_turn_loop can call vLLM server directly (async path).
+        # AgentLoopManager has server_addresses + server_handles + global_load_balancer
+        # but not a server_manager attribute (that's on AgentLoopWorker).
+        if self.traj_collector is not None and self.async_rollout_manager is not None:
+            from verl.experimental.agent_loop import AsyncLLMServerManager
+            servers = list(zip(
+                self.async_rollout_manager.server_addresses,
+                self.async_rollout_manager.server_handles,
+                strict=True,
+            ))
+            self.traj_collector._server_manager = AsyncLLMServerManager(
+                self.config,
+                servers,
+                load_balancer_handle=self.async_rollout_manager.global_load_balancer,
+            )
 
     # ------------------------------------------------------------------ #
     # SkillRL skill-evolution hooks (pillar C) — ported verbatim from    #
