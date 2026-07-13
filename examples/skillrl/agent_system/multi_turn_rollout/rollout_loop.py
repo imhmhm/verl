@@ -276,6 +276,28 @@ class TrajectoryCollector:
 
                     effective_batch.append(data)
             
+        # Pad all tensor entries to equal length before collate_fn.
+        # Each step may have different response lengths -> different full-sequence
+        # lengths. torch.stack in collate_fn requires equal-size tensors.
+        tensor_keys = set()
+        for data in effective_batch:
+            for k, v in data.items():
+                if isinstance(v, torch.Tensor) and v.dim() > 0:
+                    tensor_keys.add(k)
+
+        # Find max length per key and pad
+        for key in tensor_keys:
+            max_len = max(data[key].size(0) for data in effective_batch if key in data)
+            for data in effective_batch:
+                if key in data:
+                    t = data[key]
+                    if t.size(0) < max_len:
+                        if key == "attention_mask":
+                            pad_val = 0
+                        else:
+                            pad_val = 0
+                        data[key] = torch.cat([t, torch.full((max_len - t.size(0),), pad_val, dtype=t.dtype)])
+
         # Convert trajectory data to DataProto format
         gen_batch_output = DataProto.from_single_dict(
             data=collate_fn(effective_batch)
