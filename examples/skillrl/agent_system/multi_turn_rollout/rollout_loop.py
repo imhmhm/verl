@@ -415,6 +415,14 @@ class TrajectoryCollector:
                 non_tensor_batch={},
             )
 
+            # Pop prompt-only keys from batch before union: batch_output has the
+            # full-sequence versions (prompt + response). to_list_of_dict uses
+            # input_ids for batch_size, which will come from batch_output.
+            batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=["raw_prompt_ids"],
+            )
+
             batch.non_tensor_batch['uid'] = uid_batch
             batch.non_tensor_batch['traj_uid'] = traj_uid
 
