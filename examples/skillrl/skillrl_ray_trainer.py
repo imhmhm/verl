@@ -816,9 +816,16 @@ class RaySkillRLTrainer(RayPPOTrainer):
                             batch.batch["reward_baselines"] = reward_baseline_tensor
 
                             del rm_scores, gen_baseline_batch, gen_baseline_output
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
-                    batch = batch.union(gen_batch_output)
+                    if self.enable_env_rollout:
+                        # Env-driven mode: gen_batch_output already contains per-step
+                        # expanded data (multi_turn_loop does env.rollout.n expansion).
+                        # Replace batch entirely (like 0.3.1 did: del batch; batch = gen_batch_output).
+                        del batch
+                        batch = gen_batch_output
+                    else:
+                        # Standard async path: repeat to align with repeated responses
+                        batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
+                        batch = batch.union(gen_batch_output)
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
