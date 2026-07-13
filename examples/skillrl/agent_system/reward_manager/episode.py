@@ -57,7 +57,7 @@ class EpisodeRewardManager(AbstractRewardManager):
     def __init__(
         self,
         tokenizer: Any,
-        num_examine: int,
+        num_examine: int = 0,
         compute_score: Callable[..., Any] | None = None,
         reward_fn_key: str = "data_source",
         normalize_by_length: bool = False,
