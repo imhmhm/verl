@@ -415,14 +415,6 @@ class TrajectoryCollector:
                 non_tensor_batch={},
             )
 
-            # Pop input keys from batch before union (like 0.3.1 did) to avoid
-            # key conflicts (batch has attention_mask for prompt, batch_output
-            # has attention_mask for response).
-            batch.pop(
-                batch_keys=["input_ids", "attention_mask", "position_ids"],
-                non_tensor_batch_keys=["raw_prompt_ids"],
-            )
-
             batch.non_tensor_batch['uid'] = uid_batch
             batch.non_tensor_batch['traj_uid'] = traj_uid
 
