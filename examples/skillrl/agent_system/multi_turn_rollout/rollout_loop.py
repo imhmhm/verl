@@ -405,12 +405,28 @@ class TrajectoryCollector:
                 if to.log_probs is not None:
                     logprobs_tensor[i, :n] = torch.tensor(to.log_probs, dtype=torch.float32)
 
+            # Get prompt tensors from batch (already padded by preprocess_single_sample)
+            prompt_ids = batch.batch["input_ids"]        # [bs, prompt_len]
+            prompt_attn = batch.batch["attention_mask"]   # [bs, prompt_len]
+            prompt_pos = batch.batch["position_ids"]      # [bs, prompt_len]
+            prompt_len = prompt_ids.size(1)
+
+            # Build full-sequence tensors: [prompt | response]
+            full_input_ids = torch.cat([prompt_ids, responses_tensor], dim=1)
+            full_attention_mask = torch.cat([prompt_attn, resp_attention_mask], dim=1)
+            # position_ids: continue from prompt's last position
+            resp_pos = prompt_pos[:, -1:] + torch.arange(1, max_resp_len + 1).unsqueeze(0)
+            full_position_ids = torch.cat([prompt_pos, resp_pos], dim=1)
+
             from tensordict import TensorDict as _TD
             batch_output = DataProto(
                 batch=_TD({
+                    "prompts": prompt_ids,
                     "responses": responses_tensor,
+                    "input_ids": full_input_ids,
+                    "attention_mask": full_attention_mask,
+                    "position_ids": full_position_ids,
                     "rollout_log_probs": logprobs_tensor,
-                    "attention_mask": resp_attention_mask,
                 }, batch_size=[batch_size]),
                 non_tensor_batch={},
             )
