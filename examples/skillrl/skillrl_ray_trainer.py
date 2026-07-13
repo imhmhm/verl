@@ -847,13 +847,26 @@ class RaySkillRLTrainer(RayPPOTrainer):
                     batch.meta_info["images_seqlens"] = images_seqlens_all
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
-                        # SkillRL env mode: always compute rule-based reward via the
-                        # reward_loop_manager (EpisodeRewardManager reads env
-                        # episode_rewards) even when use_rm is False.
+                        # SkillRL env mode: compute reward directly on driver (not via
+                        # reward_loop_workers). reward_loop_workers chunk the batch by
+                        # num_workers which requires len(batch) % num_workers == 0;
+                        # env mode produces unpredictable per-step row counts.
+                        # EpisodeRewardManager is simple (reads episode_rewards from
+                        # non_tensor_batch), so compute it directly.
                         need_reward_compute = (self.use_rm or self.enable_env_rollout) and "rm_scores" not in batch.batch.keys()
                         if need_reward_compute:
-                            batch_reward = self._compute_reward_colocate(batch)
-                            batch = batch.union(batch_reward)
+                            if self.enable_env_rollout and not self.use_rm:
+                                # Direct reward computation on driver (rule-based, no chunking)
+                                reward_tensor = torch.zeros_like(batch.batch["responses"], dtype=torch.float32)
+                                for i in range(len(batch)):
+                                    episode_rewards = float(batch.non_tensor_batch["episode_rewards"][i])
+                                    prompt_length = batch.batch["prompts"][i].shape[-1]
+                                    valid_response_length = batch.batch["attention_mask"][i][prompt_length:].sum()
+                                    reward_tensor[i, valid_response_length - 1] = episode_rewards
+                                batch.batch["rm_scores"] = reward_tensor
+                            else:
+                                batch_reward = self._compute_reward_colocate(batch)
+                                batch = batch.union(batch_reward)
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
