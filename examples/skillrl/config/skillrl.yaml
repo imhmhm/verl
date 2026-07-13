@@ -122,6 +122,7 @@ actor_rollout_ref:
 # ---- trainer ----
 trainer:
   critic_warmup: 0
+  balance_batch: False  # env mode: per-step row count is unpredictable, can't guarantee divisible by dp_size
   logger: [console]
   project_name: verl_agent_skillrl
   experiment_name: skillrl
