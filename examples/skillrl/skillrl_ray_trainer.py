@@ -822,6 +822,13 @@ class RaySkillRLTrainer(RayPPOTrainer):
                         # Replace batch entirely (like 0.3.1 did: del batch; batch = gen_batch_output).
                         del batch
                         batch = gen_batch_output
+                        # Pad to be divisible by dp_size: env mode produces
+                        # unpredictable per-step row counts; all downstream
+                        # worker operations (compute_log_prob, update_actor,
+                        # etc.) require len(batch) % dp_size == 0.
+                        _dp_size = self.actor_rollout_wg.world_size
+                        if len(batch) % _dp_size != 0:
+                            batch, _pad_size = pad_dataproto_to_divisor(batch, _dp_size)
                     else:
                         # Standard async path: repeat to align with repeated responses
                         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
