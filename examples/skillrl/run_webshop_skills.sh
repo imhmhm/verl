@@ -21,6 +21,7 @@ python -m examples.skillrl.main_skillrl \
     env.env_name=Webshop \
     env.max_steps=15 \
     env.rollout.n=8 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
     env.skills_only_memory.skills_json_path=examples/skillrl/memory_data/webshop/claude_style_skills.json \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.max_num_seqs=256 \

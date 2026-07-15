@@ -13,6 +13,7 @@ GiGPO registry forwarding in compute_advantage's else branch.
 from __future__ import annotations
 
 import json
+import math
 import os
 import uuid
 from collections import defaultdict
@@ -38,6 +39,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    compute_variance_proxy_metrics,
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import extract_reward
@@ -827,13 +829,24 @@ class RaySkillRLTrainer(RayPPOTrainer):
                         # Replace batch entirely (like 0.3.1 did: del batch; batch = gen_batch_output).
                         del batch
                         batch = gen_batch_output
-                        # Pad to be divisible by dp_size: env mode produces
-                        # unpredictable per-step row counts; all downstream
-                        # worker operations (compute_log_prob, update_actor,
-                        # etc.) require len(batch) % dp_size == 0.
+                        # Pad to lcm(dp_size, effective mini_batch_size): env
+                        # mode produces unpredictable per-step row counts.
+                        # compute_log_prob needs len(batch) % dp_size == 0; the
+                        # actor update's make_iterator HARD-asserts
+                        # len(batch) % mini_batch_size == 0. New verl is strict
+                        # here, unlike old verl's TensorDict.split which kept a
+                        # smaller last mini-batch (what original SkillRL relied
+                        # on, together with agent_system adjust_batch). _update_actor
+                        # multiplies ppo_mini_batch_size by rollout.n (=1 in env
+                        # mode), so effective mini_batch_size = ppo_mini * rollout.n.
                         _dp_size = self.actor_rollout_wg.world_size
-                        if len(batch) % _dp_size != 0:
-                            batch, _pad_size = pad_dataproto_to_divisor(batch, _dp_size)
+                        _eff_mini = (
+                            self.config.actor_rollout_ref.actor.ppo_mini_batch_size
+                            * self.config.actor_rollout_ref.rollout.n
+                        )
+                        _size_divisor = int(_dp_size * _eff_mini // math.gcd(_dp_size, _eff_mini))
+                        if len(batch) % _size_divisor != 0:
+                            batch, _pad_size = pad_dataproto_to_divisor(batch, _size_divisor)
                     else:
                         # Standard async path: repeat to align with repeated responses
                         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)

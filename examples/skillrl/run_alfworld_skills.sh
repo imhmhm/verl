@@ -20,6 +20,7 @@ python -m examples.skillrl.main_skillrl \
     env.env_name=alfworld/AlfredTWEnv \
     env.max_steps=50 \
     env.rollout.n=8 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
     env.skills_only_memory.skills_json_path=examples/skillrl/memory_data/alfworld/claude_style_skills.json \
     trainer.experiment_name=alfworld_skillrl \
     $@

@@ -90,7 +90,7 @@ actor_rollout_ref:
     optim:
       lr: 1e-6
     use_remove_padding: True
-    ppo_mini_batch_size: 16
+    ppo_mini_batch_size: 256  # 默认值；各 env 脚本按原版对齐覆盖(alfworld 128 / webshop 64 / search 256|512)
     ppo_micro_batch_size_per_gpu: 2
     use_kl_loss: True
     kl_loss_coef: 0.01
