@@ -777,6 +777,11 @@ class RaySkillRLTrainer(RayPPOTrainer):
                                 is_train=True,
                             )
                             gen_batch_output.meta_info.setdefault("timing", {})
+                            # Sleep vLLM server to free NPU memory for training
+                            # (same as standard path after generate_sequences).
+                            # Without this, vLLM + FSDP training compete for GPU
+                            # memory -> aclrtMapMem failed -> EngineCore crash.
+                            self.checkpoint_manager.sleep_replicas()
                         else:
                             if curr_step_profile:
                                 self.async_rollout_manager.start_profile()
