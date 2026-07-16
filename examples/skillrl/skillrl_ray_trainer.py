@@ -401,7 +401,19 @@ class RaySkillRLTrainer(RayPPOTrainer):
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
             sample_outputs.extend(output_texts)
 
-            test_batch = test_batch.union(test_output_gen_batch)
+            # Env mode: gen_batch_output is per-step rows (size != test_batch
+            # prompts), so union is impossible (union_tensor_dict asserts equal
+            # batch_size -- same bug pattern as train, fixed there with
+            # `del batch; batch = gen_batch_output`). Replace test_batch entirely.
+            # gen_batch_output carries uid/data_source/success_rate/episode_rewards
+            # per step (set in multi_turn_loop + gather_rollout_data), so the
+            # downstream val reads (uid@412, data_source@439, success_rate@442,
+            # reward@418) all work.
+            if self.enable_env_rollout:
+                del test_batch
+                test_batch = test_output_gen_batch
+            else:
+                test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
 
             # Store original inputs
@@ -412,12 +424,26 @@ class RaySkillRLTrainer(RayPPOTrainer):
             sample_uids.extend(test_batch.non_tensor_batch["uid"])
 
             # evaluate using reward_function
-            # SkillRL env mode: compute rule-based reward via the reward_loop_manager
-            # (EpisodeRewardManager reads env episode_rewards) since the async
-            # rollout manager is bypassed.
+            # SkillRL env mode: compute rule-based reward directly on the driver.
+            # The val batch is per-step rows (env mode, unpredictable count);
+            # reward_loop_manager.compute_rm_score chunks by num_workers and
+            # ray.get-waits on reward_loop_workers, which hangs at save_freq
+            # validation (workers sit idle through training, then deadlock on the
+            # first val call). EpisodeRewardManager just reads episode_rewards
+            # (populated by multi_turn_loop regardless of is_train), so compute
+            # it directly here -- same as train mode.
             if self.enable_env_rollout and "rm_scores" not in test_batch.batch.keys():
-                test_batch_reward = self._compute_reward_colocate(test_batch)
-                test_batch = test_batch.union(test_batch_reward)
+                if not self.use_rm:
+                    reward_tensor = torch.zeros_like(test_batch.batch["responses"], dtype=torch.float32)
+                    for i in range(len(test_batch)):
+                        episode_rewards = float(test_batch.non_tensor_batch["episode_rewards"][i])
+                        prompt_length = test_batch.batch["prompts"][i].shape[-1]
+                        valid_response_length = test_batch.batch["attention_mask"][i][prompt_length:].sum()
+                        reward_tensor[i, valid_response_length - 1] = episode_rewards
+                    test_batch.batch["rm_scores"] = reward_tensor
+                else:
+                    test_batch_reward = self._compute_reward_colocate(test_batch)
+                    test_batch = test_batch.union(test_batch_reward)
             reward_tensor, reward_extra_info = extract_reward(test_batch)
 
             scores = reward_tensor.sum(-1).cpu().tolist()
